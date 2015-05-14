@@ -3,7 +3,7 @@
 -behaviour(gen_server).
 
 %% api
--export([worker_completed/3]).
+-export([pool/1, pool/2, worker_completed/3]).
 
 %% private gen_server api
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2,
@@ -19,9 +19,21 @@
                 restraint_times = [ ] %%
                }).
 
+-type url() :: binary().
+-type server_ref() :: atom() | pid().
 
 %% API
 
+-spec pool(ServerRef :: server_ref()) -> any().
+pool(Server) ->
+  gen_server:call(Server, pool).
+
+-spec pool(ServerRef :: server_ref(), Urls :: [ url() ]) -> term().
+pool(Server, Urls) ->
+  gen_server:cast(Server, {pool, Urls}).
+
+-spec worker_completed(Pid :: pid(), Url :: url(), Response :: term())
+                      -> term().
 worker_completed(Pid, Url, Response) ->
   gen_server:cast(Pid, {worker_completed, Url, Response}).
 
@@ -43,8 +55,16 @@ init([Module, SupId]) ->
       {stop, {init, badargs}}
   end.
 
+handle_call(pool, _From, S) ->
+  handle_call_return(S#state.urls, S);
+
 handle_call(_Request, _From, S) ->
-  {reply, ok, S}.
+  handle_call_return(ok, S).
+
+
+handle_cast({pool, Urls}, S) ->
+  io:format("==> ~p~n", [Urls]),
+  handle_cast_return( S#state{ urls = S#state.urls ++ Urls });
 
 handle_cast({worker_completed, Url, Response}, S) ->
   Module = S#state.module,
@@ -76,6 +96,9 @@ code_change(_OldVsn, S, _Extra) ->
 terminate(_Reason, _S) ->
   ok.
 
+
+%% internal functions
+
 handle_info_return(S) ->
   Now = now_(),
   case S#state.urls of
@@ -84,6 +107,14 @@ handle_info_return(S) ->
     _ ->
       {noreply, S}
   end.
+
+handle_call_return(Reply, S) ->
+  Now = now_(),
+  case S#state.urls of
+    [ ] -> {reply, Reply, S};
+    _   -> {reply, Reply, S, calc_timeout(Now, S)}
+  end.
+
 
 handle_cast_return(S) ->
   Now = now_(),

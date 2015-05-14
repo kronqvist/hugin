@@ -18,5 +18,6 @@ start_worker(Pid, Url) ->
 
     hugin_server:worker_completed(Pid, Url, Response)
   catch E:R ->
-      raven:worker_completed(Url, {failed, {E, R, erlang:get_stacktrace()}})
+      hugin_server:worker_completed(
+        Url, {failed, {E, R, erlang:get_stacktrace()}})
   end.

@@ -5,5 +5,5 @@
    {applications, [kernel, stdlib, hackney]},
    {mod, {hugin_app, []}},
    {env, []},
-   {modules, [hugin, raven, raven_cfg, hugin_worker, hugin_sup,
-              hugin_server_sup, hugin_app, hugin_server]}]}.
+   {modules, [hugin, raven, hugin_opts, hugin_worker, hugin_sup,
+              hugin_server_sup, hugin_html, hugin_app, hugin_server]}]}.

@@ -1,4 +1,4 @@
--module(raven_cfg).
+-module(hugin_opts).
 
 -export([restraint_connections/2, restraint_connections/3]).
 
