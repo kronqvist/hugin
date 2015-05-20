@@ -16,15 +16,15 @@
          code_change/3]).
 
 %% definitions
--record(state, {module,               %% Callback module
-                sup,                  %% Name of supervisor
-                state,                %% State of implemented behaviour module
-                urls     = [ ],       %% Pool of unqueried urls
-                pending  = [ ],       %% Urls currently being queried
-                timeouts = [ ],       %% Callback requested timeouts
-                restraint = false,    %% Restraint option
+-record(state, {callback,            %% Callback module
+                sup,                 %% Name of supervisor
+                state,               %% State of implemented behaviour callback
+                urls     = [ ],      %% Pool of unqueried urls
+                pending  = [ ],      %% Urls currently being queried
+                timeouts = [ ],      %% Callback requested timeouts
+                restraint = false,   %% Restraint option
                 restraint_times = [ ],
-                rcond                 %% Restraint condition
+                rcond                %% Restraint condition
                }).
 
 -type url() :: binary().
@@ -46,17 +46,18 @@ worker_completed(Pid, Url, Response) ->
   gen_server:cast(Pid, {worker_completed, Url, Response}).
 
 %% gen_server callbacks
-init([ Module, SupId ]) ->
-  case Module:init() of
-    {ok, State, Urls, Opts} when is_list(Urls), Urls /= [ ] ->
+init([ Callback, SupId ]) ->
+  case callback(Callback, init, [ ]) of
+    {ok, State, Urls, Opts} when is_list(Urls) ->
       Restraint = lists:keyfind(restraint, 1, Opts),
-      {ok, #state{
-              module    = Module,
-              sup       = SupId,
-              state     = State,
-              urls      = Urls,
-              restraint = Restraint /= false,
-              rcond     = Restraint}, 0};
+      handle_init_return(
+        #state{
+           callback    = Callback,
+           sup       = SupId,
+           state     = State,
+           urls      = Urls,
+           restraint = Restraint /= false,
+           rcond     = Restraint});
 
     {stop, Reason} ->
       {stop, Reason};
@@ -79,9 +80,7 @@ handle_cast({pool, Urls}, S) ->
   handle_cast_return( S#state{ urls = S#state.urls ++ Urls });
 
 handle_cast({worker_completed, Url, Response}, S) ->
-  Module = S#state.module,
-
-  case Module:request(Url, Response, S#state.state) of
+  case callback(S#state.callback, request, [Url, Response, S#state.state]) of
     {ok, Urls, NewState} -> S1 = S;
     {ok, Urls, NewState, Tmt} ->
       Now = now_(),
@@ -99,8 +98,7 @@ handle_info(timeout, S) ->
 
   case not empty(S#state.timeouts) andalso Now >= hd(S#state.timeouts) of
     true ->
-      Module = S#state.module,
-      case Module:timeout(S#state.state) of
+      case callback(S#state.callback, timeout, [S#state.state]) of
         {ok, Urls, NewState} ->
           handle_info_return(
             S#state{ urls = S#state.urls ++ Urls,
@@ -137,6 +135,12 @@ terminate(_Reason, _S) ->
 
 
 %% internal functions
+
+handle_init_return(S) ->
+  case empty(S#state.urls) of
+    true -> {ok, S};
+    false -> {ok, S, 0}
+  end.
 
 handle_info_return(S) ->
   Now = now_(),
@@ -197,3 +201,9 @@ timeout_t(Now, S) ->
 
 min0(Val) when is_integer(Val), Val < 0 -> 0;
 min0(Val) when is_integer(Val)          -> Val.
+
+callback(Callback, CallbackType, Args) ->
+  if
+    is_atom(    Callback) -> apply(Callback,  CallbackType, Args);
+    is_function(Callback) -> apply(Callback, [CallbackType, Args])
+  end.

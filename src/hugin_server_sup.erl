@@ -13,10 +13,10 @@
          {hugin_worker, start_link, [Pid, Url]},
          transient, 5000, worker, [hugin_worker]}).
 
--define(SERVER(M, SupId),
-        {M,
+-define(SERVER(Id, SupId, Cback),
+        {Id,
          {gen_server, start_link,
-          [{local, M}, hugin_server, [M, SupId], [ ]]},
+          [{local, Id}, hugin_server, [Cback, SupId], [ ]]},
          permanent, 5000, worker, [hugin_server]}).
 
 %% Supervisor callbacks
@@ -24,5 +24,12 @@
 start_worker(Pid, Id, Url) ->
   supervisor:start_child(Id, ?WORKER(Pid, Url)).
 
-init([Module, SupId]) ->
-  {ok, {{one_for_one, 10, 1}, [?SERVER(Module, SupId)]}}.
+init([Callback, SupId]) ->
+  Id = server_id(Callback),
+  {ok, {{one_for_one, 10, 1}, [?SERVER(Id, SupId, Callback)]}}.
+
+server_id(F) when is_function(F) ->
+  server_id(erlang:ref_to_list(make_ref()));
+
+server_id(Module) ->
+  list_to_atom( lists:concat([Module])).
