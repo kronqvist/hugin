@@ -92,7 +92,6 @@ url(ServerRef, Urls) ->
 max_freq(ServerRef, Amount, Unit) ->
   max_freq(ServerRef, Amount, 1, Unit).
 
-
 %% @equiv set_option(ServerRef, hugin_opts:max_freq(ServerRef, Amount, 1, U))
 %% @see hugin_opts:max_freq/4
 max_freq(ServerRef, Amount, N, Unit) ->
@@ -116,8 +115,12 @@ set_option(ServerRef, O) ->
 
 %% @doc Immediately update the behavior of the Hugin server.
 set_options(ServerRef, Options) ->
-  hugin_server:set_options(ServerRef, Options).
-
+  %% Verify that ServerRef is of the right type. The options will be checked
+  %% in hugin_server and return {error, badarg} if any of them are not.
+  case is_atom(ServerRef) orelse is_pid(ServerRef) of
+    false -> exit(badarg);
+    true -> hugin_server:set_options(ServerRef, Options)
+  end.
 
 %%%=========================================================================
 %%%  Private Functions

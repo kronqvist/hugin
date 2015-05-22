@@ -3,17 +3,10 @@
 -behaviour(gen_server).
 
 %% api
--export([set_options/2,
-         url/1,
-         url/2,
-         worker_completed/3]).
+-export([set_options/2, url/1, url/2, worker_completed/3]).
 
 %% private gen_server api
--export([init/1,
-         handle_call/3,
-         handle_cast/2,
-         handle_info/2,
-         terminate/2,
+-export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2,
          code_change/3]).
 
 %% private
@@ -32,76 +25,104 @@
                 rcond                %% Restraint condition
                }).
 
--type url() :: binary().
--type server_ref() :: atom() | pid().
-
-%% API
-
--spec set_options(server_ref(), [hugin_opts:opt()]) -> ok | {error, any()}.
+%%%========================================================================
+%%% API
+%%%========================================================================
 
 set_options(ServerRef, Options) ->
   gen_server:call(ServerRef, {set_options, Options}).
 
-
--spec url(ServerRef :: server_ref()) -> any().
 url(ServerRef) ->
   gen_server:call(ServerRef, url).
 
--spec url(ServerRef :: server_ref(), Urls :: [ url() ]) -> term().
 url(ServerRef, Urls) ->
   gen_server:cast(ServerRef, {url, Urls}).
 
--spec worker_completed(Pid :: pid(), Url :: url(), Response :: term())
-                      -> term().
 worker_completed(Pid, Url, Response) ->
   gen_server:cast(Pid, {worker_completed, Url, Response}).
 
-%% gen_server callbacks
+%%%========================================================================
+%%% Gen Server Callback
+%%%========================================================================
+
+%% Init will call the callback's init function which
+%% allows the callback to:
+%%   * perform any side effect
+%%   * provide a starting state for its own callback
+%%   * provide a list of URLs to start fetching
+%%   * provide a list of options to modify the standard behavior of Hugin
 init([Callback, SupId]) ->
   case callback(Callback, init, [ ]) of
+
+    %% Normal conditions
     {ok, CallbackState, Urls, Opts} when is_list(Urls) ->
+
       case catch set_options1(Opts, #state{ }) of
+        %% At least one option was not valid
         {'EXIT', _} ->
           {stop, badarg};
+
+        %% All options are valid, server will start
         State ->
           handle_init_return(
             State#state{
-               callback    = Callback,
+               callback  = Callback,
                sup       = SupId,
                state     = CallbackState,
                urls      = Urls
              })
       end;
 
+    %% The following two is to allow the callback to be compliant
+    %% with the normal gen_server behavior.
+    %%
+    %% One
     {stop, Reason} ->
       {stop, Reason};
 
+    %% Two
     ignore ->
       ignore;
 
+    %% Anything else will crash the server with a badarg exception
     _ ->
       {stop, badarg}
+
   end.
 
+%% Return the list of URLs that has not yet been fetched
 handle_call(url, _From, S) ->
   handle_call_return(S#state.urls, S);
 
+%% Set new options. This will not be done half-way. Either all options will
+%% be set, or none. If any option is not valid the function will fail with a badarg.
 handle_call({set_options, Options}, _From, S) ->
   case catch set_options1(Options, S) of
-    {'EXIT', _} ->   handle_call_return({error, bad_arg}, S);
+    {'EXIT', _} ->   handle_call_return({error, badarg}, S);
     #state{} = S1 -> handle_call_return(ok, S1)
   end;
 
+%% Please don't crash if someone is abusing us
 handle_call(_Request, _From, S) ->
   handle_call_return(ok, S).
 
-
+%% Add more URLs to the list to be fetched
 handle_cast({url, Urls}, S) ->
   handle_cast_return( S#state{ urls = S#state.urls ++ Urls });
 
+%% Worker has completed. We need to call our callback's request/3 function.
+%% This allows the callback to:
+%%   * perform any side effect
+%%   * provide a starting state for its own callback
+%%   * provide a list of URLs to start fetching
+%%   * TODO: provide a list of options to modify the standard behavior of Hugin
+%%   * provide a "heart beat" (timeout)
 handle_cast({worker_completed, Url, Response}, S) ->
   case callback(S#state.callback, request, [Url, Response, S#state.state]) of
+    %% normal case
     {ok, Urls, NewState} -> S1 = S;
+
+    %% callback provided us with a heart beat request
     {ok, Urls, NewState, Tmt} ->
       Now = now_(),
       S1 = S#state{ timeouts = lists:sort([ Now + Tmt | S#state.timeouts ]) }
@@ -144,18 +165,34 @@ handle_info(timeout, S) ->
                                restraint(RT, Now, S) ]})
   end;
 
+%% Please don't crash if someone is abusing us
 handle_info(_Info, S) ->
   handle_info_return(S).
 
+%% Please don't crash if someone is abusing us
 code_change(_OldVsn, S, _Extra) ->
   {ok, S}.
 
+%% Please don't crash if someone is abusing us
 terminate(_Reason, _S) ->
   ok.
 
 
-%% internal functions
+%%%========================================================================
+%%% Internal Functions
+%%%========================================================================
 
+
+%% Functions to give a proper gen_server return value.
+%% These functions will also decide to return a timeout if one of the
+%% following conditions are met:
+%%   * we can fetch a new URL right away in which case 0 is returned
+%%   * we can fetch a new soon in which case that time is returned
+%%   * callback has requested a "heart beat" in which case that heart
+%%     beat timeout is returned
+%%
+%% If no timeout is returned it means that we must wait until one of the
+%% current requests have finished
 handle_init_return(S) ->
   case empty(S#state.urls) of
     true -> {ok, S};
@@ -183,20 +220,20 @@ handle_cast_return(S) ->
     false -> {noreply, S}
   end.
 
+%% If a timeout should be returned or not
 should_use_timeouts(S) ->
   max_par_ok(S) andalso max_freq_ok(S).
 
+%% If a timeout should be returned due to max_par option
 max_par_ok(#state{ max_par = infinity }) -> true;
 max_par_ok(#state{ pending = Pending, max_par = N }) ->
   length(Pending) < N.
 
+%% If a timeout should be returned due to max_freq option
 max_freq_ok(S) ->
   not (empty(S#state.urls) andalso empty(S#state.timeouts)).
 
-
-
-
-
+%% Gives current time in milliseconds
 now_() ->
   {MgS, S, Us} = erlang:now(),
   1000000000 * MgS + 1000 * S + Us div 1000.
@@ -220,6 +257,7 @@ timeout(Now, S) ->
      true      -> 0
   end.
 
+%% Calculate timeout due to max_freq
 timeout_r(_, #state{ restraint = false }) -> 0;
 timeout_r(Now, S) ->
   case S#state.rcond of
@@ -229,27 +267,36 @@ timeout_r(Now, S) ->
       min0(Earliest + Every - Now)
   end.
 
+%% Calculate timeout due to callback's heart beat
 timeout_t(_, #state{ timeouts = [ ] }) -> undefined;
 timeout_t(Now, S) ->
   min0( hd(S#state.timeouts) - Now).
 
+%% Returns 0 if value is negative and value otherwise
 min0(Val) when is_integer(Val), Val < 0 -> 0;
 min0(Val) when is_integer(Val)          -> Val.
 
+%% Call the callback.
+%% The callback can be one of the following:
+%%   * A module in which case we will call Module:init|request|timeout
+%%   * A function in which case we will call Fun(init|request|timeout, Args)
 callback(Callback, CallbackType, Args) ->
   if
     is_atom(    Callback) -> apply(Callback,  CallbackType, Args);
     is_function(Callback) -> apply(Callback, [CallbackType, Args])
   end.
 
+%% Return a new state with the updated options
 set_options1(Options, S) ->
   lists:foldl(
     fun({Option, Data}, State) -> ?MODULE:Option(Data, State) end, S, Options).
 
-%% @private
-max_par(N, S) when is_integer(N) ->
+%% Return a new state with the max_par option updated
+max_par(N, S) when is_integer(N) orelse N == infinity ->
   S#state{ max_par = N }.
 
-%% @private
+%% Return a new state with the max_freq option updated
+max_freq(infinity, S) ->
+  S#state{ restraint = false };
 max_freq({A, Ms}, S) when is_integer(A), is_integer(Ms) ->
   S#state{ restraint = true, rcond = {restraint, A, Ms} }.
