@@ -3,8 +3,9 @@
 -behaviour(gen_server).
 
 %% api
--export([pool/1,
-         pool/2,
+-export([set_options/2,
+         url/1,
+         url/2,
          worker_completed/3]).
 
 %% private gen_server api
@@ -15,6 +16,9 @@
          terminate/2,
          code_change/3]).
 
+%% private
+-export([max_freq/2, max_par/2]).
+
 %% definitions
 -record(state, {callback,            %% Callback module
                 sup,                 %% Name of supervisor
@@ -22,6 +26,7 @@
                 urls     = [ ],      %% Pool of unqueried urls
                 pending  = [ ],      %% Urls currently being queried
                 timeouts = [ ],      %% Callback requested timeouts
+                max_par  = 5,        %% Max simultaneous outgoing connections
                 restraint = false,   %% Restraint option
                 restraint_times = [ ],
                 rcond                %% Restraint condition
@@ -32,13 +37,19 @@
 
 %% API
 
--spec pool(ServerRef :: server_ref()) -> any().
-pool(Server) ->
-  gen_server:call(Server, pool).
+-spec set_options(server_ref(), [hugin_opts:opt()]) -> ok | {error, any()}.
 
--spec pool(ServerRef :: server_ref(), Urls :: [ url() ]) -> term().
-pool(Server, Urls) ->
-  gen_server:cast(Server, {pool, Urls}).
+set_options(ServerRef, Options) ->
+  gen_server:call(ServerRef, {set_options, Options}).
+
+
+-spec url(ServerRef :: server_ref()) -> any().
+url(ServerRef) ->
+  gen_server:call(ServerRef, url).
+
+-spec url(ServerRef :: server_ref(), Urls :: [ url() ]) -> term().
+url(ServerRef, Urls) ->
+  gen_server:cast(ServerRef, {url, Urls}).
 
 -spec worker_completed(Pid :: pid(), Url :: url(), Response :: term())
                       -> term().
@@ -46,18 +57,21 @@ worker_completed(Pid, Url, Response) ->
   gen_server:cast(Pid, {worker_completed, Url, Response}).
 
 %% gen_server callbacks
-init([ Callback, SupId ]) ->
+init([Callback, SupId]) ->
   case callback(Callback, init, [ ]) of
-    {ok, State, Urls, Opts} when is_list(Urls) ->
-      Restraint = lists:keyfind(restraint, 1, Opts),
-      handle_init_return(
-        #state{
-           callback    = Callback,
-           sup       = SupId,
-           state     = State,
-           urls      = Urls,
-           restraint = Restraint /= false,
-           rcond     = Restraint});
+    {ok, CallbackState, Urls, Opts} when is_list(Urls) ->
+      case catch set_options1(Opts, #state{ }) of
+        {'EXIT', _} ->
+          {stop, badarg};
+        State ->
+          handle_init_return(
+            State#state{
+               callback    = Callback,
+               sup       = SupId,
+               state     = CallbackState,
+               urls      = Urls
+             })
+      end;
 
     {stop, Reason} ->
       {stop, Reason};
@@ -66,17 +80,23 @@ init([ Callback, SupId ]) ->
       ignore;
 
     _ ->
-      {stop, {init, badargs}}
+      {stop, badarg}
   end.
 
-handle_call(pool, _From, S) ->
+handle_call(url, _From, S) ->
   handle_call_return(S#state.urls, S);
+
+handle_call({set_options, Options}, _From, S) ->
+  case catch set_options1(Options, S) of
+    {'EXIT', _} ->   handle_call_return({error, bad_arg}, S);
+    #state{} = S1 -> handle_call_return(ok, S1)
+  end;
 
 handle_call(_Request, _From, S) ->
   handle_call_return(ok, S).
 
 
-handle_cast({pool, Urls}, S) ->
+handle_cast({url, Urls}, S) ->
   handle_cast_return( S#state{ urls = S#state.urls ++ Urls });
 
 handle_cast({worker_completed, Url, Response}, S) ->
@@ -144,24 +164,38 @@ handle_init_return(S) ->
 
 handle_info_return(S) ->
   Now = now_(),
-  case empty(S#state.urls) andalso empty(S#state.timeouts) of
-    true  -> {noreply, S};
-    false -> {noreply, S, timeout(Now, S)}
+  case should_use_timeouts(S) of
+    true  -> {noreply, S, timeout(Now, S)};
+    false -> {noreply, S}
   end.
 
 handle_call_return(Reply, S) ->
   Now = now_(),
-  case empty(S#state.urls) andalso empty(S#state.timeouts) of
-    true  -> {reply, Reply, S};
-    false -> {reply, Reply, S, timeout(Now, S)}
+  case should_use_timeouts(S) of
+    true  -> {reply, Reply, S, timeout(Now, S)};
+    false -> {reply, Reply, S}
   end.
 
 handle_cast_return(S) ->
   Now = now_(),
-  case empty(S#state.urls) andalso empty(S#state.timeouts) of
-    true  -> {noreply, S};
-    false -> {noreply, S, timeout(Now, S)}
+  case should_use_timeouts(S) of
+    true  -> {noreply, S, timeout(Now, S)};
+    false -> {noreply, S}
   end.
+
+should_use_timeouts(S) ->
+  max_par_ok(S) andalso max_freq_ok(S).
+
+max_par_ok(#state{ max_par = infinity }) -> true;
+max_par_ok(#state{ pending = Pending, max_par = N }) ->
+  length(Pending) < N.
+
+max_freq_ok(S) ->
+  not (empty(S#state.urls) andalso empty(S#state.timeouts)).
+
+
+
+
 
 now_() ->
   {MgS, S, Us} = erlang:now(),
@@ -207,3 +241,15 @@ callback(Callback, CallbackType, Args) ->
     is_atom(    Callback) -> apply(Callback,  CallbackType, Args);
     is_function(Callback) -> apply(Callback, [CallbackType, Args])
   end.
+
+set_options1(Options, S) ->
+  lists:foldl(
+    fun({Option, Data}, State) -> ?MODULE:Option(Data, State) end, S, Options).
+
+%% @private
+max_par(N, S) when is_integer(N) ->
+  S#state{ max_par = N }.
+
+%% @private
+max_freq({A, Ms}, S) when is_integer(A), is_integer(Ms) ->
+  S#state{ restraint = true, rcond = {restraint, A, Ms} }.
